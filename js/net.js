@@ -77,6 +77,15 @@ export function watch(code, { onPlayers, onEvent }) {
   return () => { off(pRef); off(eRef); };
 }
 
+// 一次讀取整個房間（用來判斷「我的房間」現在輪到誰）；房間不存在時回傳 null
+export async function roomSnapshot(code) {
+  const snap = await get(ref(db, `rooms/${code}`));
+  if (!snap.exists()) return null;
+  const v = snap.val();
+  const events = Object.keys(v.events || {}).sort().map((k) => JSON.parse(v.events[k]));
+  return { ver: v.ver, settings: JSON.parse(v.settings), players: v.players || {}, events };
+}
+
 // 寫入第 n 筆事件；如果對方剛好先寫了同一筆，回傳 false
 export async function pushEvent(code, n, ev) {
   const r = await runTransaction(ref(db, `rooms/${code}/events/${evKey(n)}`), (cur) => (cur === null ? JSON.stringify(ev) : undefined));

@@ -1,8 +1,8 @@
 import * as E from './engine.js';
 import * as Net from './net.js';
 import { moveInfo, EVASION, CLASH, STRUGGLE } from './moves.js';
+import { buildEditor, core, toMon, toSheet, monName, SPR } from './editor.js';
 
-const SPR = 'https://bpmw0711.github.io/pokerole3.0-zh-TW/assets/spr/';
 const ATTRS = [['str', '力量'], ['dex', '靈巧'], ['vit', '體魄'], ['spe', '特殊'], ['ins', '洞察']];
 const SOC = [['tough', '強壯'], ['cool', '帥氣'], ['beauty', '美麗'], ['cute', '可愛'], ['clever', '聰明']];
 const SKILLS = [['戰鬥', [['brawl', '鬥毆'], ['channel', '導引'], ['clash', '對抗'], ['evasion', '閃避']]],
@@ -11,7 +11,7 @@ const SKILLS = [['戰鬥', [['brawl', '鬥毆'], ['channel', '導引'], ['clash'
 const CAT = { phys: '物理', spec: '特殊', status: '變化' };
 
 let DB;
-const APP = { view: 'home', editing: null, editMon: null, room: null, mods: { acc: 0, dmg: 0, push: false, count: 1 }, page: 0, modal: null };
+const APP = { view: 'home', editing: null, post: null, room: null, mods: { acc: 0, dmg: 0, push: false, count: 1 }, page: 0, modal: null };
 
 // ───────── 小工具 ─────────
 function h(tag, attrs, ...kids) {
@@ -54,16 +54,76 @@ function render() {
   const app = document.getElementById('app');
   app.replaceChildren();
   const v = { home: viewHome, teams: viewTeams, edit: viewEdit, room: viewRoom }[APP.view];
+  APP.post = null;
+  if (APP.lastView !== APP.view) { window.scrollTo(0, 0); APP.lastView = APP.view; }
   app.append(v());
   if (APP.modal) app.append(APP.modal());
+  if (APP.post) { const f = APP.post; APP.post = null; f(); } // 元素放進頁面之後才能做的事（綁定篩選面板、讀取房間）
 }
 
 // ───────── 首頁 ─────────
+const hero = (title, sub) => h('div', { class: 'hero' }, h('span', { class: 'pball' }), h('div', {}, h('h1', {}, title), sub ? h('small', {}, sub) : null));
+const ptitle = (t, small) => h('h2', { class: 'ptitle' }, t, small ? h('small', {}, small) : null);
+
+// 最近進出的房間（存在這個瀏覽器；伺服器上的房間不會因此被刪除）
+const isGuest = () => new URLSearchParams(location.search).has('guest');
+const recents = () => load('pkb.rooms', []).filter((r) => Date.now() - r.ts < 14 * 86400e3);
+function touchRoom(code, patch) {
+  if (isGuest()) return;
+  const old = recents().find((r) => r.code === code) || { code };
+  const list = recents().filter((r) => r.code !== code);
+  list.unshift({ ...old, ...patch, ts: Date.now() });
+  save('pkb.rooms', list.slice(0, 12));
+}
+const forgetRoom = (code) => save('pkb.rooms', recents().filter((r) => r.code !== code));
+
+function roomStatus(snap, side) {
+  if (snap.ver !== E.ENGINE_VER) return { kind: 'end', text: '版本不同，無法重連', dead: true };
+  let s;
+  try { s = E.replay(snap.settings, snap.events); } catch { return { kind: 'end', text: '紀錄無法重播', dead: true }; }
+  const foe = E.other(side);
+  if (s.winner) return { kind: 'end', text: s.winner === 'draw' ? '平手' : s.winner === side ? '已結束：你贏了' : '已結束：對手獲勝' };
+  if (s.phase === 'setup') {
+    if (!snap.players[foe]) return { kind: 'wait', text: '等待對手加入' };
+    return s.sides[side].team ? { kind: 'wait', text: '等待對手選隊伍' } : { kind: 'go', text: '輪到你選隊伍' };
+  }
+  const ex = E.expecting(s);
+  return ex.sides.includes(side) ? { kind: 'go', text: `輪到你了（第 ${s.round} 戰鬥輪）` } : { kind: 'wait', text: `等待對手（第 ${s.round} 戰鬥輪）` };
+}
+
+async function refreshRooms() {
+  const box = document.getElementById('myrooms');
+  const list = recents();
+  if (!box || !list.length) return;
+  box.replaceChildren(h('div', { class: 'panel' }, ptitle('我的房間'), h('p', { class: 'muted small' }, '讀取中…')));
+  const rows = [];
+  await Promise.all(list.map(async (r) => {
+    try {
+      const snap = await Net.roomSnapshot(r.code);
+      if (!snap) { forgetRoom(r.code); return; }
+      const side = snap.players.A?.uid === Net.uid ? 'A' : snap.players.B?.uid === Net.uid ? 'B' : null;
+      if (!side) { forgetRoom(r.code); return; }
+      rows.push({ r, foe: snap.players[E.other(side)]?.name || '', st: roomStatus(snap, side) });
+    } catch { rows.push({ r, foe: r.opp || '', st: { kind: 'wait', text: '暫時讀不到' } }); }
+  }));
+  if (!document.getElementById('myrooms')) return; // 已經換頁
+  const order = { go: 0, wait: 1, end: 2 };
+  rows.sort((a, b) => order[a.st.kind] - order[b.st.kind] || b.r.ts - a.r.ts);
+  box.replaceChildren(rows.length ? h('div', { class: 'panel' }, ptitle('我的房間', '斷線或重開後，點「重新連線」就能回到原本的位置'),
+    rows.map(({ r, foe, st }) => h('div', { class: `roomrow ${st.kind === 'go' ? 'mine' : ''}` },
+      h('span', { class: 'rc' }, r.code),
+      h('span', {}, foe ? `對手：${foe}` : '對手：—'),
+      h('span', { class: `pill ${st.kind}` }, st.text),
+      h('span', { class: 'grow' }),
+      st.dead ? null : h('button', { class: st.kind === 'go' ? 'primary' : '', onclick: () => enterRoom(r.code, true) }, st.kind === 'end' ? '查看' : '重新連線'),
+      h('button', { class: 'small', title: '只從這個清單移除，房間本身不會被刪除', onclick: () => { forgetRoom(r.code); refreshRooms(); } }, '移除')))) : '');
+}
+
 function viewHome() {
   const name = load('pkb.name', '');
   const st = load('pkb.settings', { teamSize: 3, defMode: 1, hpStat: 'vit' });
   const nameIn = h('input', { value: name, placeholder: '你的名字', maxlength: 20, oninput: (e) => save('pkb.name', e.target.value.trim()) });
-  const codeIn = h('input', { placeholder: '房號', maxlength: 6, style: { width: '110px', textTransform: 'uppercase' } });
+  const codeIn = h('input', { placeholder: '6 碼房號', maxlength: 6, style: { width: '120px', textTransform: 'uppercase', letterSpacing: '3px', fontWeight: 700 } });
   const size = h('select', { onchange: (e) => { st.teamSize = +e.target.value; save('pkb.settings', st); } }, [1, 2, 3, 4, 5, 6].map((n) => h('option', { value: n, selected: st.teamSize === n }, `每方 ${n} 隻`)));
   const defm = h('select', { onchange: (e) => { st.defMode = +e.target.value; save('pkb.settings', st); render(); } },
     h('option', { value: 1, selected: st.defMode === 1 }, '雙防選項 1：防禦＝特防＝體魄'),
@@ -71,15 +131,18 @@ function viewHome() {
   const hp = st.defMode === 2 ? h('select', { onchange: (e) => { st.hpStat = e.target.value; save('pkb.settings', st); } },
     h('option', { value: 'vit', selected: st.hpStat !== 'ins' }, 'HP 用體魄計算'), h('option', { value: 'ins', selected: st.hpStat === 'ins' }, 'HP 用洞察計算')) : null;
   const teams = load('pkb.teams', []);
+  APP.post = refreshRooms;
   return h('div', {},
-    h('h1', {}, 'Pokerole 3.0 線上對戰'),
-    h('div', { class: 'panel' }, h('div', { class: 'row' }, h('b', {}, '名字'), nameIn)),
-    h('div', { class: 'panel' }, h('div', { class: 'row' }, h('b', {}, '我的隊伍'), h('span', { class: 'muted' }, `${teams.length} 隊`),
-      h('button', { onclick: () => { APP.view = 'teams'; render(); } }, '管理隊伍'))),
-    h('div', { class: 'panel' }, h('h2', {}, '開新房間'), h('div', { class: 'row' }, size, defm, hp,
-      h('button', { class: 'primary', onclick: () => createRoom(st) }, '建立房間'))),
-    h('div', { class: 'panel' }, h('h2', {}, '加入房間'), h('div', { class: 'row' }, codeIn,
-      h('button', { class: 'primary', onclick: () => enterRoom(codeIn.value, true) }, '加入'))),
+    hero('Pokérole 3.0 線上對戰', '朋友之間的單打對戰　自動擲骰、判定行動順序、計算傷害'),
+    h('div', { class: 'panel' }, ptitle('訓練家'), h('div', { class: 'row' }, h('label', { class: 'field-l' }, '名字'), nameIn)),
+    h('div', { id: 'myrooms' }),
+    h('div', { class: 'menu' },
+      h('div', { class: 'panel' }, ptitle('開新房間'), h('div', { class: 'stack' }, size, defm, hp, h('button', { class: 'primary', onclick: () => createRoom(st) }, '建立房間'))),
+      h('div', { class: 'panel' }, ptitle('加入房間'), h('div', { class: 'stack' }, h('p', { class: 'muted small', style: { margin: 0 } }, '輸入對手給你的房號，或直接開啟他傳的邀請連結。'),
+        h('div', { class: 'row' }, codeIn, h('button', { class: 'primary', onclick: () => enterRoom(codeIn.value, true) }, '加入')))),
+      h('div', { class: 'panel' }, ptitle('我的隊伍', `${teams.length} 隊`), h('div', { class: 'stack' },
+        teams.length ? h('div', { class: 'muted small' }, teams.slice(0, 3).map((t) => h('div', {}, `${t.name}（${t.mons.length} 隻）`))) : h('p', { class: 'muted small', style: { margin: 0 } }, '還沒有隊伍，先去建一隊吧。'),
+        h('button', { onclick: () => { APP.view = 'teams'; render(); } }, '管理隊伍')))),
     h('p', { class: 'small muted' }, '規則依 Pokerole 3.0 原書；本工具的判定方式與改編見 ', h('a', { href: 'RULES-NOTES.md', target: '_blank' }, '規則判定紀錄'), '。'),
   );
 }
@@ -99,125 +162,49 @@ async function createRoom(settings) {
 // ───────── 隊伍管理 ─────────
 function viewTeams() {
   const teams = load('pkb.teams', []);
+  const P = core(DB);
+  const newTeam = () => { APP.editing = { id: uidShort(), name: '新隊伍', mons: [] }; APP.view = 'edit'; render(); };
+  const importTeam = () => P.dialog({
+    title: '匯入隊伍', text: '', hint: '貼上 <a href="https://pokepast.es/" target="_blank" rel="noopener">pokepast.es</a> 網址、Pokémon Showdown 格式的文字，或本工具、規則站隨機產生器匯出的文字。每隊最多 6 隻。',
+    imports: [{ label: '匯入為新隊伍', fn: (r) => {
+      const t = { id: uidShort(), name: r.title || '匯入的隊伍', mons: r.sets.slice(0, 6).map(toMon) };
+      teams.push(t); save('pkb.teams', teams); render();
+      return true;
+    } }],
+  });
+  const exportTeam = (t) => P.dialog({
+    title: `匯出隊伍：${t.name}`, uploadTitle: t.name, text: P.toPasteTeam(t.mons.map(toSheet)), imports: [],
+    hint: '複製這段文字，或上傳到 <a href="https://pokepast.es/" target="_blank" rel="noopener">pokepast.es</a> 取得分享網址。第一行、特性、性格、招式用英文，Pokerole 專有的能力值等放在另外幾行。',
+  });
   return h('div', {},
-    h('div', { class: 'row' }, h('button', { onclick: () => { APP.view = 'home'; render(); } }, '← 回首頁'), h('h1', {}, '我的隊伍')),
-    h('p', { class: 'small muted' }, '隊伍存在這台裝置的瀏覽器裡。'),
-    teams.map((t, i) => h('div', { class: 'panel row' },
-      h('b', {}, t.name), h('span', { class: 'muted' }, t.mons.map((m) => m.nick || DB.dex[m.dex].z).join('、') || '（空）'),
-      h('span', { style: { flex: 1 } }),
-      h('button', { class: 'small', onclick: () => { APP.editing = structuredClone(t); APP.editMon = null; APP.view = 'edit'; render(); } }, '編輯'),
-      h('button', { class: 'small', onclick: () => { const c = structuredClone(t); c.id = uidShort(); c.name += '（複製）'; teams.splice(i + 1, 0, c); save('pkb.teams', teams); render(); } }, '複製'),
-      h('button', { class: 'small', onclick: () => { if (confirm(`刪除隊伍「${t.name}」？`)) { teams.splice(i, 1); save('pkb.teams', teams); render(); } } }, '刪除'))),
-    h('button', { class: 'primary', onclick: () => { APP.editing = { id: uidShort(), name: '新隊伍', mons: [] }; APP.editMon = null; APP.view = 'edit'; render(); } }, '＋ 新增隊伍'),
-  );
-}
-
-function newMon(dex) {
-  const d = DB.dex[dex];
-  return {
-    dex, nick: '', rank: d.rk || 1,
-    attr: Object.fromEntries(ATTRS.map(([k], i) => [k, d.st[i][0]])),
-    social: Object.fromEntries(SOC.map(([k]) => [k, 1])),
-    skills: {}, loyalty: 2, happiness: 2, ability: d.ab[0] || '', item: '', moves: [],
-  };
+    hero('我的隊伍', '隊伍存在這台裝置的瀏覽器裡，可用匯出備份或分享'),
+    h('div', { class: 'row', style: { marginBottom: '12px' } }, h('button', { onclick: () => { APP.view = 'home'; render(); } }, '← 回首頁'),
+      h('button', { class: 'primary', onclick: newTeam }, '＋ 新增隊伍'), h('button', { onclick: importTeam }, '匯入隊伍')),
+    h('div', { class: 'panel' }, ptitle('隊伍清單', `${teams.length} 隊`),
+      teams.length ? teams.map((t, i) => h('div', { class: 'teamcard' },
+        h('div', { class: 'minis' }, [0, 1, 2, 3, 4, 5].map((k) => t.mons[k] ? sprite(t.mons[k].dex) : h('span', { class: 'e' }, '·'))),
+        h('div', { class: 'grow' }, h('b', {}, t.name), h('div', { class: 'small muted' }, `${t.mons.length} 隻：${t.mons.map((m) => monName(DB, m)).join('、') || '（空）'}`)),
+        h('button', { class: 'small', onclick: () => { APP.editing = structuredClone(t); APP.view = 'edit'; render(); } }, '編輯'),
+        h('button', { class: 'small', onclick: () => exportTeam(t) }, '匯出'),
+        h('button', { class: 'small', onclick: () => { const c = structuredClone(t); c.id = uidShort(); c.name += '（複製）'; teams.splice(i + 1, 0, c); save('pkb.teams', teams); render(); } }, '複製'),
+        h('button', { class: 'small', onclick: () => { if (confirm(`刪除隊伍「${t.name}」？`)) { teams.splice(i, 1); save('pkb.teams', teams); render(); } } }, '刪除')))
+        : h('p', { class: 'muted' }, '還沒有隊伍。按「新增隊伍」，或匯入別人分享的隊伍。')));
 }
 
 function viewEdit() {
-  const t = APP.editing;
-  const saveTeam = () => {
-    for (const m of t.mons) if (!m.moves.length) { toast(`${m.nick || DB.dex[m.dex].z} 至少要有一個招式`); return; }
-    const teams = load('pkb.teams', []);
-    const i = teams.findIndex((x) => x.id === t.id);
-    if (i >= 0) teams[i] = t; else teams.push(t);
-    save('pkb.teams', teams); toast('已儲存');
-    APP.view = 'teams'; render();
-  };
-  const list = h('div', { class: 'mons' }, t.mons.map((m, i) => h('div', { class: 'moncard', style: APP.editMon === i ? { outline: '2px solid var(--accent)' } : {} },
-    sprite(m.dex), h('div', { style: { flex: 1 } }, h('b', {}, m.nick || DB.dex[m.dex].z), h('div', { class: 'small muted' }, `${rankName(m.rank)}・${m.moves.length} 招`)),
-    h('div', { class: 'col' }, h('button', { class: 'small', onclick: () => { APP.editMon = i; render(); } }, '編輯'),
-      h('button', { class: 'small', onclick: () => { t.mons.splice(i, 1); APP.editMon = null; render(); } }, '移除')))));
-  const search = h('input', { list: 'dexlist', placeholder: '輸入寶可夢名稱（中文或英文）', style: { width: '260px' } });
-  const add = () => {
-    const v = search.value.trim();
-    const idx = DB.dex.findIndex((d) => `${d.z} ${d.n} #${d.num}` === v || d.z === v || d.n.toLowerCase() === v.toLowerCase());
-    if (idx < 0) { toast('找不到這隻寶可夢，請從清單選'); return; }
-    if (t.mons.length >= 6) { toast('隊伍最多 6 隻'); return; }
-    t.mons.push(newMon(idx)); APP.editMon = t.mons.length - 1; render();
-  };
-  return h('div', {},
-    h('div', { class: 'row' }, h('button', { onclick: () => { if (confirm('放棄未儲存的變更？')) { APP.view = 'teams'; render(); } } }, '← 返回'),
-      h('input', { value: t.name, oninput: (e) => { t.name = e.target.value; }, style: { fontSize: '18px', width: '220px' } }),
-      h('button', { class: 'primary', onclick: saveTeam }, '儲存隊伍')),
-    h('div', { class: 'panel' }, list, h('div', { class: 'row', style: { marginTop: '8px' } }, search, h('button', { onclick: add }, '加入隊伍'))),
-    h('datalist', { id: 'dexlist' }, DB.dex.map((d) => h('option', { value: `${d.z} ${d.n} #${d.num}` }))),
-    APP.editMon !== null && t.mons[APP.editMon] ? monEditor(t.mons[APP.editMon]) : null,
-  );
-}
-
-function num(obj, key, min, max, onchange) {
-  return h('input', { type: 'number', min, max, value: obj[key] ?? 0, onchange: (e) => { obj[key] = Math.max(min, Math.min(max, parseInt(e.target.value, 10) || 0)); onchange && onchange(); } });
-}
-
-function monEditor(m) {
-  const d = DB.dex[m.dex];
-  const re = () => render();
-  const skillCap = [0, 1, 2, 3, 4, 5, 5, 5, 5][m.rank];
-  const moveCap = m.attr.ins + 3;
-  const derived = () => {
-    const master = m.rank >= 7 ? 3 : 0;
-    return h('div', { class: 'derived small' },
-      h('span', {}, `HP ${d.hp}＋體魄 ${m.attr.vit}${master ? '＋3' : ''}＝${d.hp + m.attr.vit + master}`),
-      h('span', {}, `意志 ${m.attr.ins + 3 + master}`),
-      h('span', {}, `先攻值 ${m.attr.dex + (m.skills.alert || 0) + master}`),
-      h('span', {}, `招式上限 ${moveCap}`));
-  };
-  const own = d.mv.filter(([k]) => DB.moves[k]);
-  const moveRow = (k, r) => {
-    const info = DB.moves[k];
-    const over = r > m.rank;
-    return h('label', { class: over ? 'over' : '', title: info.e },
-      h('input', { type: 'checkbox', checked: m.moves.includes(k), onchange: (e) => {
-        if (e.target.checked) m.moves.push(k); else m.moves = m.moves.filter((x) => x !== k);
-        re();
-      } }), ` ${info.z}`, h('span', { class: 'muted' }, ` ${info.t}・${rankName(r) || ''}`));
-  };
-  const extra = m.moves.filter((k) => !own.some(([x]) => x === k));
-  const otherIn = h('input', { list: 'movelist', placeholder: '其他招式（招式學習器等）', style: { width: '220px' } });
-  return h('div', { class: 'panel' },
-    h('div', { class: 'row' }, sprite(m.dex), h('div', {},
-      h('h2', { style: { margin: 0 } }, d.z, ' ', h('span', { class: 'muted small' }, `${d.n} #${d.num}`)),
-      h('div', {}, d.ty.map(typeChip), h('span', { class: 'small muted' }, ` 基礎 HP ${d.hp}・建議階級 ${rankName(d.rk)}`)))),
-    h('div', { class: 'grid2', style: { marginTop: '8px' } },
-      h('div', { class: 'field' }, h('label', {}, '暱稱'), h('input', { value: m.nick, maxlength: 16, oninput: (e) => { m.nick = e.target.value.trim(); } })),
-      h('div', { class: 'field' }, h('label', {}, '階級'), h('select', { onchange: (e) => { m.rank = +e.target.value; re(); } },
-        [1, 2, 3, 4, 5, 6, 7, 8].map((r) => h('option', { value: r, selected: m.rank === r }, rankName(r))))),
-      h('div', { class: 'field' }, h('label', {}, '特性'), h('select', { onchange: (e) => { m.ability = e.target.value; } },
-        d.ab.map((a) => h('option', { value: a, selected: m.ability === a }, DB.abilities[a]?.z || a)))),
-      h('div', { class: 'field' }, h('label', {}, '攜帶道具（只顯示，不自動生效）'), h('input', { value: m.item, maxlength: 30, oninput: (e) => { m.item = e.target.value; } })),
-      h('div', { class: 'field' }, h('label', {}, '忠誠度'), num(m, 'loyalty', 0, 5)),
-      h('div', { class: 'field' }, h('label', {}, '幸福度'), num(m, 'happiness', 0, 5)),
-    ),
-    m.ability && DB.abilities[m.ability] ? h('p', { class: 'small muted' }, `特性效果：${DB.abilities[m.ability].e}`) : null,
-    h('h3', {}, '能力值', h('span', { class: 'small muted' }, '（括號內是圖鑑上限）')),
-    h('div', { class: 'grid2' }, ATTRS.map(([k, z], i) => h('div', { class: 'field' }, h('label', {}, `${z}（${d.st[i][0]}–${d.st[i][1]}）`), num(m.attr, k, 0, 12, re)))),
-    h('h3', {}, '社交能力值'),
-    h('div', { class: 'grid2' }, SOC.map(([k, z]) => h('div', { class: 'field' }, h('label', {}, z), num(m.social, k, 0, 10)))),
-    h('h3', {}, '技能', h('span', { class: 'small muted' }, `（${rankName(m.rank)}每項上限 ${skillCap}）`)),
-    SKILLS.map(([g, list]) => h('div', { class: 'grid2' }, list.map(([k, z]) => h('div', { class: 'field' }, h('label', {}, `${g}・${z}`), num(m.skills, k, 0, 5, re))))),
-    derived(),
-    h('h3', {}, `招式（已選 ${m.moves.length}／上限 ${moveCap}）`, m.moves.length > moveCap ? h('span', { class: 'warn small' }, ' 超過上限') : null),
-    h('p', { class: 'small muted' }, '灰字是高於目前階級的招式。'),
-    h('div', { class: 'movelist' }, own.map(([k, r]) => moveRow(k, r)), extra.map((k) => moveRow(k, 0))),
-    h('div', { class: 'row', style: { marginTop: '6px' } }, otherIn, h('button', { class: 'small', onclick: () => {
-      const v = otherIn.value.trim();
-      const k = Object.keys(DB.moves).find((x) => DB.moves[x].z === v || x.toLowerCase() === v.toLowerCase());
-      if (!k) { toast('找不到這個招式'); return; }
-      if (!m.moves.includes(k)) m.moves.push(k);
-      re();
-    } }, '加入')),
-    h('datalist', { id: 'movelist' }, Object.entries(DB.moves).filter(([k]) => k !== EVASION && k !== CLASH && k !== STRUGGLE).map(([k, v]) => h('option', { value: v.z }))),
-    h('p', { class: 'small muted' }, '閃避、對抗、掙扎每隻寶可夢都會，不用另外選。'),
-  );
+  const ed = buildEditor(DB, APP.editing, {
+    toast,
+    onBack: () => { APP.view = 'teams'; render(); },
+    onSave: (team) => {
+      const teams = load('pkb.teams', []);
+      const i = teams.findIndex((x) => x.id === team.id);
+      if (i >= 0) teams[i] = team; else teams.push(team);
+      save('pkb.teams', teams); toast('已儲存');
+      APP.view = 'teams'; render();
+    },
+  });
+  APP.post = ed.mount;
+  return h('div', {}, ed.el);
 }
 
 // ───────── 房間 ─────────
@@ -234,12 +221,13 @@ async function enterRoom(code, joining) {
       if (!/滿/.test(e.message)) throw e;
       toast('房間已滿，以觀戰模式進入');
     }
+    if (side) touchRoom(code, { side });
     if (APP.room && APP.room.unsub) APP.room.unsub();
     const room = { code, side, settings: info.settings, players: info.players, events: [], state: E.newGame(info.settings), broken: null };
     APP.room = room; APP.view = 'room'; APP.modal = null;
     history.replaceState(null, '', `?room=${code}${location.search.includes('guest') ? '&guest' : ''}`);
     room.unsub = Net.watch(code, {
-      onPlayers: (p) => { room.players = p; render(); },
+      onPlayers: (p) => { room.players = p; const f = p[side === 'A' ? 'B' : 'A']; if (side && f) touchRoom(code, { opp: f.name }); render(); },
       onEvent: (key, ev) => {
         if (room.broken) return;
         const n = parseInt(key.slice(1), 10);
@@ -282,14 +270,14 @@ function viewLobby() {
   const pick = h('select', {}, teams.map((t, i) => h('option', { value: i }, `${t.name}（${t.mons.length} 隻）`)));
   const url = `${location.origin}${location.pathname}?room=${r.code}`;
   return h('div', {},
-    h('div', { class: 'row' }, h('button', { onclick: leave }, '← 離開'), h('h1', {}, '對戰房間')),
+    hero('對戰房間', `房號 ${r.code}`), h('div', { class: 'row', style: { marginBottom: '10px' } }, h('button', { onclick: leave }, '← 離開')),
     h('div', { class: 'panel' }, h('div', { class: 'row' }, h('span', {}, '房號'), h('span', { class: 'code' }, r.code),
       h('button', { class: 'small', onclick: () => navigator.clipboard.writeText(url).then(() => toast('已複製邀請連結')) }, '複製邀請連結')),
       h('p', { class: 'small muted' }, `每方最多 ${r.settings.teamSize} 隻・雙防選項 ${r.settings.defMode}${r.settings.defMode === 2 ? `・HP 用${r.settings.hpStat === 'ins' ? '洞察' : '體魄'}` : ''}`)),
-    h('div', { class: 'panel' }, h('h2', {}, '玩家'),
+    h('div', { class: 'panel' }, h('h2', { class: 'ptitle' }, '玩家'),
       ['A', 'B'].map((x) => h('div', {}, `${x === 'A' ? '房主' : '挑戰者'}：`, r.players[x]?.name || h('span', { class: 'muted' }, '等待加入…'),
         x === r.side ? h('span', { class: 'muted' }, '（你）') : null, s.sides[x].team ? h('span', { class: 'chip up' }, '隊伍已就緒') : null))),
-    h('div', { class: 'panel' }, h('h2', {}, '選擇出戰隊伍'),
+    h('div', { class: 'panel' }, h('h2', { class: 'ptitle' }, '選擇出戰隊伍'),
       mine ? h('p', {}, '你的隊伍已送出，等待對手…')
         : teams.length ? h('div', { class: 'row' }, pick, h('button', { class: 'primary', onclick: () => {
           const t = teams[+pick.value];
