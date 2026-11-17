@@ -19,7 +19,7 @@ function rnd(a){return a[Math.floor(Math.random()*a.length)]}
 function pad(n){return n?'#'+String(n).padStart(3,'0'):''}
 function chip(t){return '<span class="tag" style="background:'+(TC[t]||'#888')+';color:'+(INK[t]||'#fff')+'">'+t+'</span>'}
 function pickW(c,w){var t=0,i;for(i=0;i<c.length;i++)t+=w[i];var r=Math.random()*t;for(i=0;i<c.length;i++){r-=w[i];if(r<0)return c[i]}return c[c.length-1]}
-function norm(t){return String(t||'').toLowerCase().replace(/♀/g,'f').replace(/♂/g,'m').replace(/[^a-z0-9一-鿿]/g,'')}
+function norm(t){return String(t||'').normalize('NFKC').toLowerCase().replace(/♀/g,'f').replace(/♂/g,'m').replace(/[^a-z0-9一-鿿]/g,'')}
 
 // ---------- 規則 ----------
 function isFull(x){return x.st.every(function(a){return a[0]>=a[1]})}// 圖鑑能力值全滿：視為傳說或幻之，沒有能力值上限
@@ -290,28 +290,30 @@ function findMove(t){if(!byMove){byMove={};Object.keys(MV).forEach(function(k){b
 function findAb(t){if(!byAb){byAb={};Object.keys(AB).forEach(function(k){byAb[norm(k)]=k;if(AB[k].z)byAb[norm(AB[k].z)]=k})}return byAb[norm(t)]||null}
 function itemOk(t){return /^[A-Z][a-z0-9:']*(?:[- ][A-Z][a-z0-9:']*)*$/.test(t)}
 function pairs(names,vals){return names.map(function(n,i){return n+' '+vals[i]}).join(' / ')}
-function toPaste(s){var x=D[s.i],o=[],nat=NA.map(function(q){return q.n}).indexOf(s.na);
- var sp=spec(x),head=(s.nick?s.nick.replace(/[()\r\n]/g,' ')+' (':'')+sp+(s.nick?')':'');
+function toPaste(s){var x=D[s.i],o=[],ab=AB[s.ab];
+ // 第一行的英文種名是給 pokepast.es 找圖用的；其餘都用中文。暱稱沒填就放中文名，頁面上才看得到中文。
+ var nk=(s.nick||x.z||'').replace(/[()\r\n]/g,' ').trim(),sp=spec(x),head=nk?nk+' ('+sp+')':sp;
  if(s.item&&itemOk(s.item))head+=' @ '+s.item;
  o.push(head);
- if(s.item&&!itemOk(s.item))o.push('Item: '+s.item.replace(/\r?\n/g,' '));
- o.push('Ability: '+s.ab);
- o.push('Rank: '+s.rank+' ('+RZ[s.rank]+')');
- if(nat>-1)o.push(NAT_EN[nat]+' Nature');
- o.push('Happiness: '+s.hap);
- o.push('Loyalty: '+s.loy);
- o.push('Attributes: '+pairs(ATTR_EN,s.st));
- o.push('Social: '+pairs(SOC_EN,s.so));
- var sk=[];SK_EN.forEach(function(n,i){if(s.sk[i]>0)sk.push(n+' '+s.sk[i])});
- o.push('Skills: '+(sk.join(' / ')||'None'));
- if(s.free)o.push('Unrestricted: Yes');
- if(s.note)o.push('Notes: '+s.note.replace(/\r?\n/g,' ⏎ '));
- s.mv.slice(0,slots(s)).forEach(function(k){if(k&&MV[k])o.push('- '+k)});
+ if(s.item&&!itemOk(s.item))o.push('道具: '+s.item.replace(/\r?\n/g,' '));
+ o.push('特性: '+((ab&&ab.z)||s.ab));
+ o.push('階級: '+s.rank+' ('+RZ[s.rank]+')');
+ o.push('性格: '+s.na);
+ o.push('幸福度: '+s.hap);
+ o.push('忠誠度: '+s.loy);
+ o.push('能力值: '+pairs(SZ,s.st));
+ o.push('社交: '+pairs(SOC,s.so));
+ var sk=[];SK.forEach(function(n,i){if(s.sk[i]>0)sk.push(n+' '+s.sk[i])});
+ o.push('技能: '+(sk.join(' / ')||'無'));
+ if(s.free)o.push('不受規則限制: 是');
+ if(s.note)o.push('備註: '+s.note.replace(/\r?\n/g,' ⏎ '));
+ s.mv.slice(0,slots(s)).forEach(function(k){if(k&&MV[k])o.push('- '+(MV[k].z||k))});
  return o.join('\n')}
 function toPasteTeam(list){return list.map(toPaste).join('\n\n')}
 function readPairs(txt,names,zh,vals){var warn=0;String(txt).split('/').forEach(function(p){var m=p.trim().match(/^(\S+)\s+(-?\d+)$/);if(!m)return;
   var k=names.findIndex(function(n){return n.toLowerCase()===m[1].toLowerCase()});if(k<0)k=zh.indexOf(m[1]);if(k>-1)vals[k]=Math.max(0,+m[2]);else warn++});return warn}
 // 解析一個寶可夢區塊；找不到寶可夢時回傳 {err}
+var KEYS={'特性':'ability','階級':'rank','道具':'item','held item':'item','幸福度':'happiness','忠誠度':'loyalty','能力值':'attributes','社交':'social','技能':'skills','備註':'notes','note':'notes','不受規則限制':'unrestricted','性格':'nature'};
 function parseSet(block,warns){var L=block.split('\n').map(function(l){return l.replace(/\s+$/,'')}).filter(function(l){return l.trim()});if(!L.length)return null;
  var head=L[0].trim(),item='',m=head.match(/^(.*?)\s+@\s+(.+)$/);
  if(m){head=m[1].trim();item=m[2].trim()}
@@ -319,18 +321,20 @@ function parseSet(block,warns){var L=block.split('\n').map(function(l){return l.
  var nick='',idx=-1;
  m=head.match(/^(.*)\(([^()]+)\)\s*$/);
  if(m){idx=findDex(m[2].trim());if(idx>-1)nick=m[1].trim()}
+ if(idx>-1&&nick===D[idx].z)nick='';
  if(idx<0)idx=findDex(head);
  if(idx<0)return {err:'找不到寶可夢「'+head+'」'};
  var x=D[idx],rank=null,kv={},moves=[],nature=null,bad=[];
  L.slice(1).forEach(function(l){var t=l.trim(),a;
   if((a=t.match(/^[-–]\s*(.+)$/))){moves.push(a[1].replace(/\s*\[[^\]]*\]\s*$/,'').split(' / ')[0].trim());return}
   if((a=t.match(/^(\S+) Nature$/i))){nature=a[1];return}
-  if((a=t.match(/^([A-Za-z][A-Za-z ]*?)\s*:\s*(.*)$/))){kv[a[1].toLowerCase()]=a[2].trim()}});
+  if((a=t.match(/^([^:：\s][^:：]*?)\s*[:：]\s*(.*)$/))){var key=a[1].trim().toLowerCase();kv[KEYS[key]||key]=a[2].trim()}});
+ if(kv.nature)nature=kv.nature;
  if(kv.rank){a=kv.rank.match(/^(\d)/);if(a&&RANK[+a[1]])rank=+a[1];else{var rr=Object.keys(RZ).filter(function(r){return kv.rank.indexOf(RZ[r])>-1})[0];if(rr)rank=+rr}}
  if(!rank)rank=x.rk||1;
  var s=roll(x,rank,'species');
  s.nick=nick;
- if(!item&&(kv.item||kv['held item']))item=kv.item||kv['held item'];
+ if(!item&&kv.item)item=kv.item;
  s.item=item;
  if(kv.ability){var ab=findAb(kv.ability.replace(/ \(Hidden\)/,''));if(ab)s.ab=ab;else bad.push('特性「'+kv.ability+'」')}
  if(nature){var ni=NAT_EN.findIndex(function(n){return n.toLowerCase()===nature.toLowerCase()});if(ni>-1&&NA[ni])s.na=NA[ni].n;else if(NA.some(function(q){return q.n===nature}))s.na=nature}
@@ -340,7 +344,7 @@ function parseSet(block,warns){var L=block.split('\n').map(function(l){return l.
  if(kv.attributes){var v=x.st.map(function(q){return q[0]});readPairs(kv.attributes,ATTR_EN,SZ,v);s.st=v}
  if(kv.social){var v2=[1,1,1,1,1];readPairs(kv.social,SOC_EN,SOC,v2);s.so=v2}
  if(kv.skills){var v3=SK.map(function(){return 0});readPairs(kv.skills,SK_EN,SK,v3);s.sk=v3}
- if(kv.unrestricted&&/^y/i.test(kv.unrestricted))s.free=true;
+ if(kv.unrestricted&&/^(y|是)/i.test(kv.unrestricted))s.free=true;
  if(kv.notes)s.note=kv.notes.replace(/ ⏎ /g,'\n');
  if(moves.length){var n=slots(s),got=[];
   moves.forEach(function(t){var k=findMove(t);if(!k)bad.push('招式「'+t+'」');else if(got.indexOf(k)<0)got.push(k)});

@@ -2,7 +2,7 @@
 // 事件一律存成 JSON 字串，避免 Realtime Database 把空陣列、null 吃掉而讓重播結果不同。
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import { getAuth, signInAnonymously, setPersistence, inMemoryPersistence, browserLocalPersistence } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-import { getDatabase, ref, get, onValue, onChildAdded, runTransaction, serverTimestamp, off } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js';
+import { getDatabase, ref, get, set, remove, onValue, onChildAdded, runTransaction, serverTimestamp, off } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js';
 
 const firebaseConfig = {
   apiKey: 'AIzaSyC5za4VacV_u0GWw5nKczafpShNpVgnpzs',
@@ -37,7 +37,7 @@ export async function createRoom(settings, name, ver) {
     const code = newCode();
     const r = await runTransaction(ref(db, `rooms/${code}`), (cur) => {
       if (cur !== null) return undefined;
-      return { created: serverTimestamp(), ver, settings: JSON.stringify(settings), players: { A: { uid, name } } };
+      return { created: serverTimestamp(), active: serverTimestamp(), ver, settings: JSON.stringify(settings), players: { A: { uid, name } } };
     });
     if (r.committed) return code;
   }
@@ -65,6 +65,7 @@ export async function roomInfo(code) {
   const snap = await get(ref(db, `rooms/${code}`));
   if (!snap.exists()) return null;
   const v = snap.val();
+  if (!v.settings) return null;
   return { ver: v.ver, settings: JSON.parse(v.settings), players: v.players || {} };
 }
 
@@ -82,6 +83,7 @@ export async function roomSnapshot(code) {
   const snap = await get(ref(db, `rooms/${code}`));
   if (!snap.exists()) return null;
   const v = snap.val();
+  if (!v.settings) return null; // 房間刪除後才寫入的殘留欄位
   const events = Object.keys(v.events || {}).sort().map((k) => JSON.parse(v.events[k]));
   return { ver: v.ver, settings: JSON.parse(v.settings), players: v.players || {}, events };
 }
@@ -89,5 +91,12 @@ export async function roomSnapshot(code) {
 // 寫入第 n 筆事件；如果對方剛好先寫了同一筆，回傳 false
 export async function pushEvent(code, n, ev) {
   const r = await runTransaction(ref(db, `rooms/${code}/events/${evKey(n)}`), (cur) => (cur === null ? JSON.stringify(ev) : undefined));
+  if (r.committed) touch(code);
   return r.committed;
 }
+
+// 記下房間最後一次有人使用的時間（自動清理舊房間時看這個欄位）；失敗不影響對戰
+export function touch(code) { set(ref(db, `rooms/${code}/active`), serverTimestamp()).catch(() => {}); }
+
+// 刪除整個房間（房主用）；對手之後再也進不來
+export async function deleteRoom(code) { await remove(ref(db, `rooms/${code}`)); }

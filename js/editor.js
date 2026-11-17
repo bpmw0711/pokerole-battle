@@ -94,7 +94,7 @@ export function buildEditor(DB, team, cb) {
     const s = sheets[sel]; if (!s) return;
     P.dialog({
       title: '匯入／匯出這隻寶可夢', uploadTitle: nameOf(s), text: P.toPaste(s),
-      hint: '文字是 <a href="https://pokepast.es/" target="_blank" rel="noopener">pokepast.es</a>（Pokémon Showdown）格式：第一行、特性、性格、招式用英文，Pokerole 專有的能力值、社交、技能等放在另外幾行，匯入時會讀回來。可貼上文字、pokepast.es 網址，或一般 Showdown 隊伍（缺的能力值會依階級隨機配點）。',
+      hint: '文字是 <a href="https://pokepast.es/" target="_blank" rel="noopener">pokepast.es</a> 能顯示的格式：第一行的英文種名是給它找圖用的，其餘（特性、性格、招式、能力值等）都是中文，匯入時會全部讀回來。可貼上文字、pokepast.es 網址，或一般 Showdown 隊伍（缺的能力值會依階級隨機配點）。',
       imports: [
         { label: '取代選取的這隻', fn: (r) => { sheets[sel] = r.sets[0]; refresh(); return r.sets.length > 1 ? '已取代；內容有多隻，只用了第一隻。' : true; } },
         { label: '加入隊伍', fn: (r) => { const room = 6 - sheets.length; if (room <= 0) return '隊伍已滿 6 隻。'; sheets.push(...r.sets.slice(0, room)); sel = sheets.length - 1; refresh(); return r.sets.length > room ? `已加入 ${room} 隻（隊伍上限 6 隻）。` : true; } },

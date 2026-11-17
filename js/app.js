@@ -67,13 +67,13 @@ const ptitle = (t, small) => h('h2', { class: 'ptitle' }, t, small ? h('small', 
 
 // 最近進出的房間（存在這個瀏覽器；伺服器上的房間不會因此被刪除）
 const isGuest = () => new URLSearchParams(location.search).has('guest');
-const recents = () => load('pkb.rooms', []).filter((r) => Date.now() - r.ts < 14 * 86400e3);
+const recents = () => load('pkb.rooms', []);
 function touchRoom(code, patch) {
   if (isGuest()) return;
   const old = recents().find((r) => r.code === code) || { code };
   const list = recents().filter((r) => r.code !== code);
   list.unshift({ ...old, ...patch, ts: Date.now() });
-  save('pkb.rooms', list.slice(0, 12));
+  save('pkb.rooms', list.slice(0, 30));
 }
 const forgetRoom = (code) => save('pkb.rooms', recents().filter((r) => r.code !== code));
 
@@ -94,7 +94,8 @@ function roomStatus(snap, side) {
 async function refreshRooms() {
   const box = document.getElementById('myrooms');
   const list = recents();
-  if (!box || !list.length) return;
+  if (!box) return;
+  if (!list.length) { box.replaceChildren(); return; }
   box.replaceChildren(h('div', { class: 'panel' }, ptitle('我的房間'), h('p', { class: 'muted small' }, '讀取中…')));
   const rows = [];
   await Promise.all(list.map(async (r) => {
@@ -103,20 +104,30 @@ async function refreshRooms() {
       if (!snap) { forgetRoom(r.code); return; }
       const side = snap.players.A?.uid === Net.uid ? 'A' : snap.players.B?.uid === Net.uid ? 'B' : null;
       if (!side) { forgetRoom(r.code); return; }
-      rows.push({ r, foe: snap.players[E.other(side)]?.name || '', st: roomStatus(snap, side) });
-    } catch { rows.push({ r, foe: r.opp || '', st: { kind: 'wait', text: '暫時讀不到' } }); }
+      rows.push({ r, side, foe: snap.players[E.other(side)]?.name || '', st: roomStatus(snap, side) });
+    } catch { rows.push({ r, side: r.side, foe: r.opp || '', st: { kind: 'wait', text: '暫時讀不到' } }); }
   }));
   if (!document.getElementById('myrooms')) return; // 已經換頁
   const order = { go: 0, wait: 1, end: 2 };
   rows.sort((a, b) => order[a.st.kind] - order[b.st.kind] || b.r.ts - a.r.ts);
   box.replaceChildren(rows.length ? h('div', { class: 'panel' }, ptitle('我的房間', '斷線或重開後，點「重新連線」就能回到原本的位置'),
-    rows.map(({ r, foe, st }) => h('div', { class: `roomrow ${st.kind === 'go' ? 'mine' : ''}` },
+    rows.map(({ r, side, foe, st }) => h('div', { class: `roomrow ${st.kind === 'go' ? 'mine' : ''}` },
       h('span', { class: 'rc' }, r.code),
+      side === 'A' ? h('span', { class: 'pill host' }, '房主') : null,
       h('span', {}, foe ? `對手：${foe}` : '對手：—'),
       h('span', { class: `pill ${st.kind}` }, st.text),
       h('span', { class: 'grow' }),
       st.dead ? null : h('button', { class: st.kind === 'go' ? 'primary' : '', onclick: () => enterRoom(r.code, true) }, st.kind === 'end' ? '查看' : '重新連線'),
-      h('button', { class: 'small', title: '只從這個清單移除，房間本身不會被刪除', onclick: () => { forgetRoom(r.code); refreshRooms(); } }, '移除')))) : '');
+      side === 'A' ? h('button', { class: 'small danger', title: '刪除這個房間（雙方都會進不去，無法復原）', onclick: () => removeRoom(r.code, refreshRooms) }, '刪除房間')
+        : h('button', { class: 'small', title: '只從這個清單移除，房間本身不會被刪除', onclick: () => { forgetRoom(r.code); refreshRooms(); } }, '移除')))) : '');
+}
+
+// 房主刪除房間（整個房間資料從資料庫移除）
+async function removeRoom(code, after) {
+  if (!confirm(`刪除房間 ${code}？
+房間裡的對戰紀錄會被清掉，對手也無法再進入，無法復原。`)) return;
+  try { await Net.deleteRoom(code); forgetRoom(code); toast('已刪除房間'); } catch (e) { toast('刪除失敗：' + e.message); return; }
+  if (after) after();
 }
 
 function viewHome() {
@@ -174,7 +185,7 @@ function viewTeams() {
   });
   const exportTeam = (t) => P.dialog({
     title: `匯出隊伍：${t.name}`, uploadTitle: t.name, text: P.toPasteTeam(t.mons.map(toSheet)), imports: [],
-    hint: '複製這段文字，或上傳到 <a href="https://pokepast.es/" target="_blank" rel="noopener">pokepast.es</a> 取得分享網址。第一行、特性、性格、招式用英文，Pokerole 專有的能力值等放在另外幾行。',
+    hint: '複製這段文字，或上傳到 <a href="https://pokepast.es/" target="_blank" rel="noopener">pokepast.es</a> 取得分享網址。第一行的英文種名是給 pokepast.es 找圖用的，其餘都是中文。',
   });
   return h('div', {},
     hero('我的隊伍', '隊伍存在這台裝置的瀏覽器裡，可用匯出備份或分享'),
@@ -221,13 +232,13 @@ async function enterRoom(code, joining) {
       if (!/滿/.test(e.message)) throw e;
       toast('房間已滿，以觀戰模式進入');
     }
-    if (side) touchRoom(code, { side });
+    if (side) { touchRoom(code, { side, host: side === 'A' }); Net.touch(code); }
     if (APP.room && APP.room.unsub) APP.room.unsub();
     const room = { code, side, settings: info.settings, players: info.players, events: [], state: E.newGame(info.settings), broken: null };
     APP.room = room; APP.view = 'room'; APP.modal = null;
     history.replaceState(null, '', `?room=${code}${location.search.includes('guest') ? '&guest' : ''}`);
     room.unsub = Net.watch(code, {
-      onPlayers: (p) => { room.players = p; const f = p[side === 'A' ? 'B' : 'A']; if (side && f) touchRoom(code, { opp: f.name }); render(); },
+      onPlayers: (p) => { if (!Object.keys(p).length) { forgetRoom(code); toast('這個房間已經被刪除了'); leave(); return; } room.players = p; const f = p[side === 'A' ? 'B' : 'A']; if (side && f) touchRoom(code, { opp: f.name }); render(); },
       onEvent: (key, ev) => {
         if (room.broken) return;
         const n = parseInt(key.slice(1), 10);
@@ -270,7 +281,7 @@ function viewLobby() {
   const pick = h('select', {}, teams.map((t, i) => h('option', { value: i }, `${t.name}（${t.mons.length} 隻）`)));
   const url = `${location.origin}${location.pathname}?room=${r.code}`;
   return h('div', {},
-    hero('對戰房間', `房號 ${r.code}`), h('div', { class: 'row', style: { marginBottom: '10px' } }, h('button', { onclick: leave }, '← 離開')),
+    hero('對戰房間', `房號 ${r.code}`), h('div', { class: 'row', style: { marginBottom: '10px' } }, h('button', { onclick: leave }, '← 離開'), r.side === 'A' ? h('button', { class: 'danger', onclick: () => removeRoom(r.code, leave) }, '刪除房間') : null),
     h('div', { class: 'panel' }, h('div', { class: 'row' }, h('span', {}, '房號'), h('span', { class: 'code' }, r.code),
       h('button', { class: 'small', onclick: () => navigator.clipboard.writeText(url).then(() => toast('已複製邀請連結')) }, '複製邀請連結')),
       h('p', { class: 'small muted' }, `每方最多 ${r.settings.teamSize} 隻・雙防選項 ${r.settings.defMode}${r.settings.defMode === 2 ? `・HP 用${r.settings.hpStat === 'ins' ? '洞察' : '體魄'}` : ''}`)),
@@ -418,7 +429,7 @@ function viewBattle() {
     h('button', { disabled: !!s.winner, onclick: () => { if (confirm('確定要投降？')) send({ type: 'forfeit' }); } }, '投降'));
   return h('div', {},
     h('div', { class: 'topbar' },
-      h('div', { class: 'row' }, h('button', { class: 'small', onclick: leave }, '← 離開'), h('span', { class: 'muted' }, `房號 ${r.code}・第 ${s.round} 戰鬥輪`)),
+      h('div', { class: 'row' }, h('button', { class: 'small', onclick: leave }, '← 離開'), h('span', { class: 'muted' }, `房號 ${r.code}・第 ${s.round} 戰鬥輪`), r.side === 'A' ? h('button', { class: 'small danger', onclick: () => removeRoom(r.code, leave) }, '刪除房間') : null),
       h('div', { class: `banner ${mine ? 'mine' : ''}` }, btxt)),
     h('div', { class: 'battle' },
       h('div', {},

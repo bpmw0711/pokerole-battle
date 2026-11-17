@@ -1,0 +1,27 @@
+name: 清理舊房間
+
+on:
+  schedule:
+    - cron: '0 3 1 * *'   # 每月 1 日 03:00（UTC）
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只列出會刪哪些房間，不真的刪除'
+        type: boolean
+        default: true
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install --no-save google-auth-library@9
+      - run: node scripts/cleanup-rooms.mjs
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          # 排程執行時 inputs 是空的，視為正式清理；手動執行時依勾選決定
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          IDLE_DAYS: '7'
